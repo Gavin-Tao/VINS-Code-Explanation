@@ -5,10 +5,10 @@ double MIN_PARALLAX;
 double ACC_N, ACC_W;
 double GYR_N, GYR_W;
 
-std::vector<Eigen::Matrix3d> RIC;
-std::vector<Eigen::Vector3d> TIC;
+std::vector<Eigen::Matrix3d> RIC; //camera到imu的旋转矩阵
+std::vector<Eigen::Vector3d> TIC; //camera到imu的平移向量
 
-Eigen::Vector3d G{0.0, 0.0, 9.8};
+Eigen::Vector3d G{0.0, 0.0, 9.8}; //重力向量
 
 double BIAS_ACC_THRESHOLD;
 double BIAS_GYR_THRESHOLD;

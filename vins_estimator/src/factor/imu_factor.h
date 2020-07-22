@@ -67,17 +67,28 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
         }
 #endif
 
+        // 构建IMU残差residual
         Eigen::Map<Eigen::Matrix<double, 15, 1>> residual(residuals);
         residual = pre_integration->evaluate(Pi, Qi, Vi, Bai, Bgi,
                                             Pj, Qj, Vj, Baj, Bgj);
 
+        //为了保证 IMU 和 视觉參差项在尺度上保持一致，一般会采用与量纲无关的马氏距离，即 e^T*P^−1*e ，但这明显与 VINS-Mono 代码中不一致。
+        //这是因为ceres只接受最小二乘优化, 也就是 e^T*e 。为了将欧式距离转换为马氏距离，首先得把 P^−1 做LLT分解，即 P^−1=L*L^T , 
+        //因此有 e^T*P^−1*e=e^T*L*L^T*e=(L^T*e)^T*(L^T*e) , 令 e'=L^T*e 作为新的优化误差, 这样就能用ceres求解了。
+        //这一行代码其实就是代表将P^−1作LLT分解，然后取L^T。
         Eigen::Matrix<double, 15, 15> sqrt_info = Eigen::LLT<Eigen::Matrix<double, 15, 15>>(pre_integration->covariance.inverse()).matrixL().transpose();
         //sqrt_info.setIdentity();
-        residual = sqrt_info * residual;
+        residual = sqrt_info * residual; //e'=L^T*e 作为新的优化误差
 
         if (jacobians)
         {
             double sum_dt = pre_integration->sum_dt;
+            /*  O_P = 0,
+            O_R = 3,
+            O_V = 6,
+            O_BA = 9,
+            O_BG = 12 */
+            // 获取预积分的误差递推函数中pqv关于ba、bg的Jacobian
             Eigen::Matrix3d dp_dba = pre_integration->jacobian.template block<3, 3>(O_P, O_BA);
             Eigen::Matrix3d dp_dbg = pre_integration->jacobian.template block<3, 3>(O_P, O_BG);
 
@@ -86,6 +97,7 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
             Eigen::Matrix3d dv_dba = pre_integration->jacobian.template block<3, 3>(O_V, O_BA);
             Eigen::Matrix3d dv_dbg = pre_integration->jacobian.template block<3, 3>(O_V, O_BG);
 
+            //使用maxCoeff()和minCoeff()函数，可以计算矩阵中的最大值和最小值
             if (pre_integration->jacobian.maxCoeff() > 1e8 || pre_integration->jacobian.minCoeff() < -1e8)
             {
                 ROS_WARN("numerical unstable in preintegration");
@@ -93,13 +105,15 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 ///                ROS_BREAK();
             }
 
+            // 第i帧的IMU位姿 pbi、qbi   https://blog.csdn.net/qq_43247439/article/details/107216889
             if (jacobians[0])
             {
+                //在Eigen中行优先的矩阵会在其名字中包含有row，否则就是列优先
                 Eigen::Map<Eigen::Matrix<double, 15, 7, Eigen::RowMajor>> jacobian_pose_i(jacobians[0]);
                 jacobian_pose_i.setZero();
 
                 jacobian_pose_i.block<3, 3>(O_P, O_P) = -Qi.inverse().toRotationMatrix();
-                jacobian_pose_i.block<3, 3>(O_P, O_R) = Utility::skewSymmetric(Qi.inverse() * (0.5 * G * sum_dt * sum_dt + Pj - Pi - Vi * sum_dt));
+                jacobian_pose_i.block<3, 3>(O_P, O_R) = Utility::skewSymmetric(Qi.inverse() * (0.5 * G * sum_dt * sum_dt + Pj - Pi - Vi * sum_dt)); //skewSymmetric反对称矩阵
 
 #if 0
             jacobian_pose_i.block<3, 3>(O_R, O_R) = -(Qj.inverse() * Qi).toRotationMatrix();
@@ -119,6 +133,7 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
                     //ROS_BREAK();
                 }
             }
+            // 第i帧的imu速度vbi、bai、bgi
             if (jacobians[1])
             {
                 Eigen::Map<Eigen::Matrix<double, 15, 9, Eigen::RowMajor>> jacobian_speedbias_i(jacobians[1]);
@@ -148,6 +163,7 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
                 //ROS_ASSERT(fabs(jacobian_speedbias_i.maxCoeff()) < 1e8);
                 //ROS_ASSERT(fabs(jacobian_speedbias_i.minCoeff()) < 1e8);
             }
+            // 第j帧的IMU位姿 pbj、qbj
             if (jacobians[2])
             {
                 Eigen::Map<Eigen::Matrix<double, 15, 7, Eigen::RowMajor>> jacobian_pose_j(jacobians[2]);
@@ -167,6 +183,7 @@ class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
                 //ROS_ASSERT(fabs(jacobian_pose_j.maxCoeff()) < 1e8);
                 //ROS_ASSERT(fabs(jacobian_pose_j.minCoeff()) < 1e8);
             }
+            // 第j帧的IMU速度vbj、baj、bgj
             if (jacobians[3])
             {
                 Eigen::Map<Eigen::Matrix<double, 15, 9, Eigen::RowMajor>> jacobian_speedbias_j(jacobians[3]);

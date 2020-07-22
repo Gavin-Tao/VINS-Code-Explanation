@@ -47,6 +47,11 @@ bool ProjectionTdFactor::Evaluate(double const *const *parameters, double *resid
 
     double td = parameters[4][0];
 
+    //pts_i是角点在归一化平面的坐标，td表示imu-camera时间戳的时间同步误差，是待优化项。
+    //TR表示Rolling shutter相机做一次rolling的时间。因为在处理imu数据的时候，已经减过一次时间同步误差，
+    //因此修正后的时间误差是td - td_i。其次row_i是角点图像坐标的纵坐标，ROW图像坐标纵坐标的最大值，
+    //因此TR / ROW * row_i就是相机 rolling 到这一行时所用的时间。velocity_i是该角点在归一化平面的运动速度。
+    //所以最后得到的pts_i_td是处理时间同步误差和Rolling shutter时间后，角点在归一化平面的坐标。
     Eigen::Vector3d pts_i_td, pts_j_td;
     pts_i_td = pts_i - (td - td_i + TR / ROW * row_i) * velocity_i;
     pts_j_td = pts_j - (td - td_j + TR / ROW * row_j) * velocity_j;

@@ -86,43 +86,65 @@ MarginalizationInfo::~MarginalizationInfo()
     }
 }
 
+//添加残差块相关信息（优化变量，待边缘化变量）
+//分别将不同损失函数对应的优化变量、边缘化位置存入到parameter_block_sizes和parameter_block_idx中，
+//这里注意的是执行到这一步，parameter_block_idx中仅仅有待边缘化的优化变量的内存地址的key，而且其对应value全部为0。
+/*  1、将残差添加到 factors 容器中。
+    2、再将每个残差的优化参数的内存地址以及维度size保存在 parameter_block_size map中 .
+    3、接着将每个残差需要marg的变量也就是drop_set中的变量，添加到 parameter_block_idx，并且先设置id=0。 */
 void MarginalizationInfo::addResidualBlockInfo(ResidualBlockInfo *residual_block_info)
 {
+    //factors  保存所有 ResidualBlockInfo   即将残差添加到图优化中
     factors.emplace_back(residual_block_info);
 
+    // 提取残差相关的参数数组指针
     std::vector<double *> &parameter_blocks = residual_block_info->parameter_blocks;
+    //每个参数的变量个数     cost_function 即Factor
     std::vector<int> parameter_block_sizes = residual_block_info->cost_function->parameter_block_sizes();
 
+    //遍历待优化变量parameter_blocks
     for (int i = 0; i < static_cast<int>(residual_block_info->parameter_blocks.size()); i++)
     {
-        double *addr = parameter_blocks[i];
-        int size = parameter_block_sizes[i];
-        parameter_block_size[reinterpret_cast<long>(addr)] = size;
+        double *addr = parameter_blocks[i]; //指向数据的指针
+        int size = parameter_block_sizes[i]; //数据长度
+        parameter_block_size[reinterpret_cast<long>(addr)] = size; //参数块地址以及变量个数  保存到hash map 
     }
 
+    //待边缘化的变量drop_set
     for (int i = 0; i < static_cast<int>(residual_block_info->drop_set.size()); i++)
     {
-        double *addr = parameter_blocks[residual_block_info->drop_set[i]];
-        parameter_block_idx[reinterpret_cast<long>(addr)] = 0;
+        double *addr = parameter_blocks[residual_block_info->drop_set[i]]; //需要marg的状态的地址
+        //需要marg的状态放置与parameter_block_idx
+        parameter_block_idx[reinterpret_cast<long>(addr)] = 0; //需要marg的设置为0 
     }
 }
 
+/*  1、对每个添加到 MarginalizationInfo 的残差 求jacobian，也就是构建Hi = Ji^T* Wi * Ji 的 Ji 。
+    2、将每个残差的状态变量拷贝到 parameter_block_data。 */
 void MarginalizationInfo::preMarginalize()
 {
+    //在前面的addResidualBlockInfo中会将不同的残差块加入到factor中
     for (auto it : factors)
     {
+        //分别计算所有状态变量构成的残差 和雅克比矩阵
         it->Evaluate();
 
+        //将状态保存到 parameter_block_data
+        //获得该残差的各优化参数维度
         std::vector<int> block_sizes = it->cost_function->parameter_block_sizes();
         for (int i = 0; i < static_cast<int>(block_sizes.size()); i++)
         {
-            long addr = reinterpret_cast<long>(it->parameter_blocks[i]);
-            int size = block_sizes[i];
+            long addr = reinterpret_cast<long>(it->parameter_blocks[i]); //优化变量的地址
+            int size = block_sizes[i]; //获得该参数的维度
+            //如果没有在 parameter_block_data 中   则添加
             if (parameter_block_data.find(addr) == parameter_block_data.end())
             {
-                double *data = new double[size];
+                double *data = new double[size]; //重新开辟一块内存
+                //将数据拷贝到 data 中
+                //void *memcpy(void *dest, void *src, unsigned int count);功能：由src所指内存区域复制count个字节到dest所指内存区域。说明：src和dest所指内存区域不能重叠，函数返回指向dest的指针。
                 memcpy(data, it->parameter_blocks[i], sizeof(double) * size);
-                parameter_block_data[addr] = data;
+                //通过之前的优化变量的数据的地址和新开辟的内存数据进行关联
+                parameter_block_data[addr] = data; //保存数据
             }
         }
     }
@@ -171,19 +193,29 @@ void* ThreadsConstructA(void* threadsstruct)
     return threadsstruct;
 }
 
+//多线程构造先验项舒尔补AX=b的结构，计算Jacobian和残差
+//pos为所有变量维度，ｍ为需要marg掉的变量，ｎ为需要保留的变量
+/*  1.设置各个状态的位置 ，放置与 parameter_block_idx map中 ，parameter_block_idx 的pair的第一个元素为状态的内存地址，第二个元素为状态的位置。
+    需要marg的状态的位置全部设置在最前面，这样构造的H矩阵中，需要marg的部分就在左上角。
+ */
 void MarginalizationInfo::marginalize()
 {
+    //将所有的优化变量进行一个伪排序，待marg的优化变量的idx为0，其他的和其所在的位置相关
     int pos = 0;
+    //遍历待marg的优化变量的内存地址
     for (auto &it : parameter_block_idx)
     {
-        it.second = pos;
-        pos += localSize(parameter_block_size[it.first]);
+        it.second = pos; //设置该变量的id  即位置 
+        pos += localSize(parameter_block_size[it.first]); //通过状态的地址查找该状态的维度    localSize()使Pose由7变为6   
     }
 
+    //m 为 marg掉的维度 
     m = pos;
 
+    //设置保留的状态（待优化的状态变量）的位置  
     for (const auto &it : parameter_block_size)
     {
+        //将未填加的状态添加到 parameter_block_idx
         if (parameter_block_idx.find(it.first) == parameter_block_idx.end())
         {
             parameter_block_idx[it.first] = pos;
@@ -195,8 +227,10 @@ void MarginalizationInfo::marginalize()
 
     //ROS_DEBUG("marginalization, pos: %d, m: %d, n: %d, size: %d", pos, m, n, (int)parameter_block_idx.size());
 
+    /*     2.多线程构造A与b矩阵。(Ax = b) */
+    //通过多线程快速构造各个残差对应的各个优化变量的信息矩阵
     TicToc t_summing;
-    Eigen::MatrixXd A(pos, pos);
+    Eigen::MatrixXd A(pos, pos); //Pos即总状态的维度  
     Eigen::VectorXd b(pos);
     A.setZero();
     b.setZero();
@@ -229,16 +263,20 @@ void MarginalizationInfo::marginalize()
     //multi thread
 
 
+/*     2.创建四个线程 ，将所有的残差(factor)均分到threadsstruct数组的元素中，然后每个线程负责一个threadsstruct的 ThreadsStruct。 */
     TicToc t_thread_summing;
     pthread_t tids[NUM_THREADS];
-    ThreadsStruct threadsstruct[NUM_THREADS];
+    ThreadsStruct threadsstruct[NUM_THREADS]; //每个元素表示该线程需要处理的残差 
     int i = 0;
+    //将各个残差块的Jacoian矩阵分配到各线程中
     for (auto it : factors)
     {
-        threadsstruct[i].sub_factors.push_back(it);
+        threadsstruct[i].sub_factors.push_back(it); //将每个残差分配到 threadsstruct
         i++;
-        i = i % NUM_THREADS;
+        i = i % NUM_THREADS; //循环
     }
+    //多线程计算 A，b矩阵，这里线程的主函数是 ThreadsConstructA()，计算完毕将结果更新到A，b
+    //遍历threadsstruct的每个元素，启动线程计算
     for (int i = 0; i < NUM_THREADS; i++)
     {
         TicToc zero_matrix;
@@ -246,6 +284,7 @@ void MarginalizationInfo::marginalize()
         threadsstruct[i].b = Eigen::VectorXd::Zero(pos);
         threadsstruct[i].parameter_block_size = parameter_block_size;
         threadsstruct[i].parameter_block_idx = parameter_block_idx;
+        //启动线程  ThreadsConstructA  对  threadsstruct[i] 进行构造
         int ret = pthread_create( &tids[i], NULL, ThreadsConstructA ,(void*)&(threadsstruct[i]));
         if (ret != 0)
         {
@@ -253,6 +292,7 @@ void MarginalizationInfo::marginalize()
             ROS_BREAK();
         }
     }
+    //更新 矩阵 A b 
     for( int i = NUM_THREADS - 1; i >= 0; i--)  
     {
         pthread_join( tids[i], NULL ); 
@@ -263,15 +303,17 @@ void MarginalizationInfo::marginalize()
     //ROS_INFO("A diff %f , b diff %f ", (A - tmp_A).sum(), (b - tmp_b).sum());
 
 
-    //TODO
-    Eigen::MatrixXd Amm = 0.5 * (A.block(0, 0, m, m) + A.block(0, 0, m, m).transpose());
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes(Amm);
+    //TODO 需要marg的部分  
+    //提取块大小为(p,q),起始于(i,j) 	matrix.block(i,j,p,q)
+    Eigen::MatrixXd Amm = 0.5 * (A.block(0, 0, m, m) + A.block(0, 0, m, m).transpose()); //对称化
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes(Amm); //求解特征值分解 
 
     //ROS_ASSERT_MSG(saes.eigenvalues().minCoeff() >= -1e-4, "min eigenvalue %f", saes.eigenvalues().minCoeff());
-
+    P^T*A*P = w  =>   A = P*w*P^T  =>   A-1 = P*w^-1*P^T
     Eigen::MatrixXd Amm_inv = saes.eigenvectors() * Eigen::VectorXd((saes.eigenvalues().array() > eps).select(saes.eigenvalues().array().inverse(), 0)).asDiagonal() * saes.eigenvectors().transpose();
     //printf("error1: %f\n", (Amm * Amm_inv - Eigen::MatrixXd::Identity(m, m)).sum());
 
+    //通过shur补操作进行边缘化 marg掉 m
     Eigen::VectorXd bmm = b.segment(0, m);
     Eigen::MatrixXd Amr = A.block(0, m, m, n);
     Eigen::MatrixXd Arm = A.block(m, 0, n, m);
@@ -280,14 +322,19 @@ void MarginalizationInfo::marginalize()
     A = Arr - Arm * Amm_inv * Amr;
     b = brr - Arm * Amm_inv * bmm;
 
+    //更新先验残差项:将marg后的结果 A，b  转换为 先验jacobian与先验残差
+    //A = PSP^T
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes2(A);
+    //对S中特征值小于 eps 的直接归0 处理  
     Eigen::VectorXd S = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array(), 0));
     Eigen::VectorXd S_inv = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array().inverse(), 0));
 
     Eigen::VectorXd S_sqrt = S.cwiseSqrt();
     Eigen::VectorXd S_inv_sqrt = S_inv.cwiseSqrt();
 
+    // A = P*S*P^T = (sqrt(S)*P^T)^T * (sqrt(S)*P^T)    =>  A = J^T*J =>   J = (sqrt(S)*P^T)
     linearized_jacobians = S_sqrt.asDiagonal() * saes2.eigenvectors().transpose();
+    //b = J^T*e =>   e = (J^T)^-1*b = sqrt(S)^-1 * P^T * b
     linearized_residuals = S_inv_sqrt.asDiagonal() * saes2.eigenvectors().transpose() * b;
     //std::cout << A << std::endl
     //          << std::endl;
@@ -330,6 +377,10 @@ MarginalizationFactor::MarginalizationFactor(MarginalizationInfo* _marginalizati
     set_num_residuals(marginalization_info->n);
 };
 
+/*  输入：待优化变量parameters；以及先验值（对于先验残差就是上一时刻的先验残差last_marginalization_info，
+    对于IMU就是预计分值pre_integrations，对于视觉就是空间的的像素坐标pts_i, pts_j）
+
+    输出：各项残差值residual以及残差对应各优化变量的Jacobian。 */
 bool MarginalizationFactor::Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
 {
     //printf("internal addr,%d, %d\n", (int)parameter_block_sizes().size(), num_residuals());
