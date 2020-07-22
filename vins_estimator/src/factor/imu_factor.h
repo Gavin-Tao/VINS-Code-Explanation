@@ -9,18 +9,28 @@
 
 #include <ceres/ceres.h>
 
+
+/*  15: 残差向量的长度(包括p,v,q,ba,bg) 平移、速度、旋转、bias各三
+    7: 第1个优化参数的长度(para_Pose[i]) 三平移+四四元数
+    9: 第2个优化参数的长度(para_SpeedBias[i]) 三速度+三aBias+三gBias
+    7: 第3个优化参数的长度(para_Pose[j])
+    9: 第4个优化参数的长度(para_SpeedBias[j])
+ */
 class IMUFactor : public ceres::SizedCostFunction<15, 7, 9, 7, 9>
 {
   public:
+    // 为了能够让程序员显式的禁用某个函数，C++11 标准引入了一个新特性："=delete"函数。程序员只需在函数声明后上“=delete;”，就可将该函数禁用。
     IMUFactor() = delete;
     IMUFactor(IntegrationBase* _pre_integration):pre_integration(_pre_integration)
     {
     }
+    //对于Evaluate输入double const *const *parameters, parameters[0], parameters[1], parameters[2], parameters[3]
+    //分别对应4个输入参数, 它们的长度依次是7,9,7,9
     virtual bool Evaluate(double const *const *parameters, double *residuals, double **jacobians) const
     {
 
         Eigen::Vector3d Pi(parameters[0][0], parameters[0][1], parameters[0][2]);
-        Eigen::Quaterniond Qi(parameters[0][6], parameters[0][3], parameters[0][4], parameters[0][5]);
+        Eigen::Quaterniond Qi(parameters[0][6], parameters[0][3], parameters[0][4], parameters[0][5]); //在Quaternion内部的保存中，虚部在前，实部在后
 
         Eigen::Vector3d Vi(parameters[1][0], parameters[1][1], parameters[1][2]);
         Eigen::Vector3d Bai(parameters[1][3], parameters[1][4], parameters[1][5]);

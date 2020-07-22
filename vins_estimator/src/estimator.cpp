@@ -669,16 +669,20 @@ bool Estimator::failureDetection()
 
 void Estimator::optimization()
 {
+    //创建一个ceres Problem实例, loss_function定义为CauchyLoss.
     ceres::Problem problem;
     ceres::LossFunction *loss_function;
     //loss_function = new ceres::HuberLoss(1.0);
     loss_function = new ceres::CauchyLoss(1.0);
+    //先添加优化参数量, ceres中参数用ParameterBlock来表示,类似于g2o中的vertex, 这里的参数块有sliding windows中所有帧的para_Pose(7维) 和 para_SpeedBias(9维). 
+    /*add vertex of: 1)pose, 2)speed and 3)bias of acc and gyro */
     for (int i = 0; i < WINDOW_SIZE + 1; i++)
     {
         ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
         problem.AddParameterBlock(para_Pose[i], SIZE_POSE, local_parameterization);
         problem.AddParameterBlock(para_SpeedBias[i], SIZE_SPEEDBIAS);
     }
+    /*add vertex of: camera extrinsic */
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
         ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
@@ -699,7 +703,9 @@ void Estimator::optimization()
 
     TicToc t_whole, t_prepare;
     vector2double();
-
+    //依次加入margin项,IMU项和视觉feature项. 每一项都是一个factor, 这是ceres的使用方法, 
+    //创建一个类继承ceres::CostFunction类, 重写Evaluate()函数定义residual的计算形式. 
+    //分别对应marginalization_factor.h, imu_factor.h, projection_factor.h中的MarginalizationInfo, IMUFactor, ProjectionFactor三个类. 
     if (last_marginalization_info)
     {
         // construct new marginlization_factor
