@@ -27,10 +27,10 @@ private:
                     cv::Mat_<double> &t1, cv::Mat_<double> &t2);
     int frame_count;
 
-    vector< Matrix3d > Rc;
-    vector< Matrix3d > Rimu;
-    vector< Matrix3d > Rc_g;
-    Matrix3d ric;
+    vector< Matrix3d > Rc; //相机之间旋转矩阵，对极几何得到
+    vector< Matrix3d > Rimu; //两个IMU之间旋转矩阵，由IMU预积分得到
+    vector< Matrix3d > Rc_g; //每个IMU相对于起始IMU的旋转矩阵
+    Matrix3d ric; //相机到IMU的外参
 };
 
 
