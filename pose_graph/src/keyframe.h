@@ -20,6 +20,10 @@ using namespace std;
 using namespace DVision;
 
 
+/**
+* @class BriefExtractor
+* @Description 通过Brief模板文件，对图像的关键点计算Brief描述子
+*/
 class BriefExtractor
 {
 public:
@@ -29,6 +33,10 @@ public:
   DVision::BRIEF m_brief;
 };
 
+/**
+* @class KeyFrame
+* @Description 构建关键帧，通过BRIEF描述子匹配关键帧和回环候选帧
+*/
 class KeyFrame
 {
 public:

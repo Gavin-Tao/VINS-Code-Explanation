@@ -1,5 +1,6 @@
 #include "keyframe.h"
 
+//剔除status为0的点
 template <typename Derived>
 static void reduceVector(vector<Derived> &v, vector<uchar> status)
 {
@@ -11,6 +12,7 @@ static void reduceVector(vector<Derived> &v, vector<uchar> status)
 }
 
 // create keyframe online
+//在线构建新关键帧
 KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3d &_vio_R_w_i, cv::Mat &_image,
 		           vector<cv::Point3f> &_point_3d, vector<cv::Point2f> &_point_2d_uv, vector<cv::Point2f> &_point_2d_norm,
 		           vector<double> &_point_id, int _sequence)
@@ -23,8 +25,8 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 	R_w_i = vio_R_w_i;
 	origin_vio_T = vio_T_w_i;		
 	origin_vio_R = vio_R_w_i;
-	image = _image.clone();
-	cv::resize(image, thumbnail, cv::Size(80, 60));
+	image = _image.clone(); //使用clone和copyto函数，这是图像的深拷贝，相当于重新创建了一份一模一样的图像。
+	cv::resize(image, thumbnail, cv::Size(80, 60)); //image输入图像，thumbnail输出图像，cv::Size(80, 60)输出图像的尺寸
 	point_3d = _point_3d;
 	point_2d_uv = _point_2d_uv;
 	point_2d_norm = _point_2d_norm;
@@ -40,7 +42,7 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 		image.release();
 }
 
-// load previous keyframe
+// load previous keyframe 载入先前关键帧
 KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3d &_vio_R_w_i, Vector3d &_T_w_i, Matrix3d &_R_w_i,
 					cv::Mat &_image, int _loop_index, Eigen::Matrix<double, 8, 1 > &_loop_info,
 					vector<cv::KeyPoint> &_keypoints, vector<cv::KeyPoint> &_keypoints_norm, vector<BRIEF::bitset> &_brief_descriptors)
@@ -71,7 +73,7 @@ KeyFrame::KeyFrame(double _time_stamp, int _index, Vector3d &_vio_T_w_i, Matrix3
 	brief_descriptors = _brief_descriptors;
 }
 
-
+//计算窗口中所有特征点的描述子
 void KeyFrame::computeWindowBRIEFPoint()
 {
 	BriefExtractor extractor(BRIEF_PATTERN_FILE.c_str());
@@ -84,15 +86,41 @@ void KeyFrame::computeWindowBRIEFPoint()
 	extractor(image, window_keypoints, window_brief_descriptors);
 }
 
+/**
+ * 在关键帧图像中检测了500个新的特征点并计算所有特征点的描述子
+*/
+//额外检测新特征点并计算所有特征点的描述子，为了回环检测
 void KeyFrame::computeBRIEFPoint()
 {
 	BriefExtractor extractor(BRIEF_PATTERN_FILE.c_str());
-	const int fast_th = 20; // corner detector response threshold
+	const int fast_th = 20; // corner detector response threshold角点检测阈值
 	if(1)
+
+		/*		
+		 *void cv::FAST	(	
+		 *	InputArray 	image,						关键点所在的灰度图像。
+		 *	std::vector< KeyPoint > & 	keypoints,	在图像上检测到关键点
+		 *	int 	threshold,						中心像素的强度与该像素周围圆的像素之间的差异的阈值
+		 *	bool 	nonmaxSuppression = true 		是否对检测到的角点（关键点）应用非最大抑制
+		 *)	 
+		*/
 		cv::FAST(image, keypoints, fast_th, true);
 	else
 	{
 		vector<cv::Point2f> tmp_pts;
+ 
+/* 		void cv::goodFeaturesToTrack( 不仅支持Harris角点检测，也支持Shi Tomasi算法的角点检测。但是，该函数检测到的角点依然是像素级别的
+		cv::InputArray image, // 输入图像（CV_8UC1 CV_32FC1）
+		cv::OutputArray corners, // 输出角点vector
+		int maxCorners, // 最大角点数目
+		double qualityLevel, // 质量水平系数（小于1.0的正数，一般在0.01-0.1之间）
+		double minDistance, // 最小距离，小于此距离的点忽略
+		cv::InputArray mask = noArray(), // mask=0的点忽略
+		int blockSize = 3, // 使用的邻域数
+		bool useHarrisDetector = false, // false ='Shi Tomasi metric'
+		double k = 0.04 // Harris角点检测时使用
+	    ); */
+		////检测500个新的特征点并将其放入keypoints
 		cv::goodFeaturesToTrack(image, tmp_pts, 500, 0.01, 10);
 		for(int i = 0; i < (int)tmp_pts.size(); i++)
 		{
@@ -101,7 +129,11 @@ void KeyFrame::computeBRIEFPoint()
 		    keypoints.push_back(key);
 		}
 	}
+
+	////计算keypoints中所有特征点的描述子
 	extractor(image, keypoints, brief_descriptors);
+
+	//将特征点去畸变矫正
 	for (int i = 0; i < (int)keypoints.size(); i++)
 	{
 		Eigen::Vector3d tmp_p;
@@ -112,12 +144,13 @@ void KeyFrame::computeBRIEFPoint()
 	}
 }
 
+//计算Brief描述子   Returns the BRIEF descriptors of the given keypoints in the given image
 void BriefExtractor::operator() (const cv::Mat &im, vector<cv::KeyPoint> &keys, vector<BRIEF::bitset> &descriptors) const
 {
   m_brief.compute(im, keys, descriptors);
 }
 
-
+//关键帧中某个特征点的描述子与回环帧的所有描述子匹配
 bool KeyFrame::searchInAera(const BRIEF::bitset window_descriptor,
                             const std::vector<BRIEF::bitset> &descriptors_old,
                             const std::vector<cv::KeyPoint> &keypoints_old,
@@ -139,6 +172,7 @@ bool KeyFrame::searchInAera(const BRIEF::bitset window_descriptor,
         }
     }
     //printf("best dist %d", bestDist);
+	//找到汉明距离小于80的最小值和索引即为该特征点的最佳匹配
     if (bestIndex != -1 && bestDist < 80)
     {
       best_match = keypoints_old[bestIndex].pt;
@@ -149,6 +183,16 @@ bool KeyFrame::searchInAera(const BRIEF::bitset window_descriptor,
       return false;
 }
 
+/**
+ * @brief   将关键帧与回环帧进行BRIEF描述子匹配
+ * @param[out]  matched_2d_old  	回环帧匹配后的二维坐标
+ * @param[out]  matched_2d_old_norm 回环帧匹配后的二维归一化坐标
+ * @param[out]  status				匹配状态，成功为1
+ * @param[in]   descriptors_old		回环帧的描述子
+ * @param[in] 	keypoints_old 		回环帧的二维坐标
+ * @param[in] 	keypoints_old_norm	回环帧的二维归一化坐标
+ * @return      void
+*/
 void KeyFrame::searchByBRIEFDes(std::vector<cv::Point2f> &matched_2d_old,
 								std::vector<cv::Point2f> &matched_2d_old_norm,
                                 std::vector<uchar> &status,
@@ -170,7 +214,7 @@ void KeyFrame::searchByBRIEFDes(std::vector<cv::Point2f> &matched_2d_old,
 
 }
 
-
+//通过RANSAC的基本矩阵检验去除匹配异常的点
 void KeyFrame::FundmantalMatrixRANSAC(const std::vector<cv::Point2f> &matched_2d_cur_norm,
                                       const std::vector<cv::Point2f> &matched_2d_old_norm,
                                       vector<uchar> &status)
@@ -193,10 +237,11 @@ void KeyFrame::FundmantalMatrixRANSAC(const std::vector<cv::Point2f> &matched_2d
             tmp_y = FOCAL_LENGTH * matched_2d_old_norm[i].y + ROW / 2.0;
             tmp_old[i] = cv::Point2f(tmp_x, tmp_y);
         }
-        cv::findFundamentalMat(tmp_cur, tmp_old, cv::FM_RANSAC, 3.0, 0.9, status);
+        cv::findFundamentalMat(tmp_cur, tmp_old, cv::FM_RANSAC, 3.0, 0.9, status); //https://blog.csdn.net/u011867581/article/details/43818183
     }
 }
 
+//通过RANSAC的PNP检验去除匹配异常的点
 void KeyFrame::PnPRANSAC(const vector<cv::Point2f> &matched_2d_old_norm,
                          const std::vector<cv::Point3f> &matched_3d,
                          std::vector<uchar> &status,
@@ -255,7 +300,7 @@ void KeyFrame::PnPRANSAC(const vector<cv::Point2f> &matched_2d_old_norm,
 
 }
 
-
+//寻找并建立关键帧与回环帧之间的匹配关系
 bool KeyFrame::findConnection(KeyFrame* old_kf)
 {
 	TicToc tmp_t;
@@ -298,6 +343,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    }
 	#endif
 	//printf("search by des\n");
+	//关键帧与回环帧进行BRIEF描述子匹配，剔除匹配失败的点
 	searchByBRIEFDes(matched_2d_old, matched_2d_old_norm, status, old_kf->brief_descriptors, old_kf->keypoints, old_kf->keypoints_norm);
 	reduceVector(matched_2d_cur, status);
 	reduceVector(matched_2d_old, status);
@@ -403,8 +449,11 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	Eigen::Vector3d relative_t;
 	Quaterniond relative_q;
 	double relative_yaw;
+
+	//若达到最小回环匹配点数
 	if ((int)matched_2d_cur.size() > MIN_LOOP_NUM)
 	{
+		//RANSAC PnP检测去除误匹配的点
 		status.clear();
 	    PnPRANSAC(matched_2d_old_norm, matched_3d, status, PnP_T_old, PnP_R_old);
 	    reduceVector(matched_2d_cur, status);
@@ -420,9 +469,21 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	        	cv::Mat gap_image(ROW, gap, CV_8UC1, cv::Scalar(255, 255, 255));
 	            cv::Mat gray_img, loop_match_img;
 	            cv::Mat old_img = old_kf->image;
+
+				/*void cv::hconcat	(	水平串联两个图像
+	             *	InputArray 	src1,	第一个输入矩阵
+				 *	InputArray 	src2,	第二个输入矩阵
+				 *	OutputArray dst 	输出矩阵，行数与前两个矩阵相同，列数为他们的总和
+				 *	)	
+	            */
+	            //这里将image、gap_image、old_img水平拼接起来成为gray_img
 	            cv::hconcat(image, gap_image, gap_image);
 	            cv::hconcat(gap_image, old_img, gray_img);
+
+				//灰度图gray_img转换成RGB图loop_match_img
 	            cvtColor(gray_img, loop_match_img, CV_GRAY2RGB);
+
+				//在图片loop_match_img上标注出匹配点和之间的连线
 	            for(int i = 0; i< (int)matched_2d_cur.size(); i++)
 	            {
 	                cv::Point2f cur_pt = matched_2d_cur[i];
@@ -440,6 +501,8 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	                old_pt.x += (COL + gap) ;
 	                cv::line(loop_match_img, matched_2d_cur[i], old_pt, cv::Scalar(0, 255, 0), 2, 8, 0);
 	            }
+
+				//在loop_match_img下面垂直拼接一个notation，写上当前帧和先前帧的索引值和序列号
 	            cv::Mat notation(50, COL + gap + COL, CV_8UC3, cv::Scalar(255, 255, 255));
 	            putText(notation, "current frame: " + to_string(index) + "  sequence: " + to_string(sequence), cv::Point2f(20, 30), CV_FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(255), 3);
 
@@ -453,6 +516,8 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	                    << old_kf->index << "-" << "3pnp_match.jpg";
 	            cv::imwrite( path.str().c_str(), loop_match_img);
 	            */
+
+			    //若达到最小回环匹配点数，将loop_match_img的宽和高缩小一半并发布为pub_match_img
 	            if ((int)matched_2d_cur.size() > MIN_LOOP_NUM)
 	            {
 	            	/*
@@ -469,6 +534,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    #endif
 	}
 
+	//若达到最小回环匹配点数
 	if ((int)matched_2d_cur.size() > MIN_LOOP_NUM)
 	{
 	    relative_t = PnP_R_old.transpose() * (origin_vio_T - PnP_T_old);
@@ -477,7 +543,9 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    //printf("PNP relative\n");
 	    //cout << "pnp relative_t " << relative_t.transpose() << endl;
 	    //cout << "pnp relative_yaw " << relative_yaw << endl;
-	    if (abs(relative_yaw) < 30.0 && relative_t.norm() < 20.0)
+	    
+		//相对位姿检验
+		if (abs(relative_yaw) < 30.0 && relative_t.norm() < 20.0)
 	    {
 
 	    	has_loop = true;
@@ -485,7 +553,9 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	    	loop_info << relative_t.x(), relative_t.y(), relative_t.z(),
 	    	             relative_q.w(), relative_q.x(), relative_q.y(), relative_q.z(),
 	    	             relative_yaw;
-	    	if(FAST_RELOCALIZATION)
+	    	
+			//快速重定位
+			if(FAST_RELOCALIZATION)
 	    	{
 			    sensor_msgs::PointCloud msg_match_points;
 			    msg_match_points.header.stamp = ros::Time(time_stamp);
@@ -519,7 +589,7 @@ bool KeyFrame::findConnection(KeyFrame* old_kf)
 	return false;
 }
 
-
+//计算两个描述子之间的汉明距离
 int KeyFrame::HammingDis(const BRIEF::bitset &a, const BRIEF::bitset &b)
 {
     BRIEF::bitset xor_of_bitset = a ^ b;
@@ -577,16 +647,25 @@ void KeyFrame::updateLoop(Eigen::Matrix<double, 8, 1 > &_loop_info)
 	}
 }
 
+//读取 构建字典时使用的相同的Brief模板文件，构造BriefExtractor
 BriefExtractor::BriefExtractor(const std::string &pattern_file)
 {
   // The DVision::BRIEF extractor computes a random pattern by default when
   // the object is created.
+  //默认情况下计算随机模式
   // We load the pattern that we used to build the vocabulary, to make
   // the descriptors compatible with the predefined vocabulary
+  //我们加载用于构建词汇表的模式，以使描述子与预定义词汇表兼容。
 
   // loads the pattern
+  /*例子： string strSettingsFile = "./setting.yaml";
+          cv::FileStorage fread(strSettingsFile.c_str(),cv::FileStorage::READ); 
+	例子： string s = "1234";
+    	  c = s.c_str();  c_str()函数返回一个指向正规C字符串的指针, 内容与本string串相同
+  */
   cv::FileStorage fs(pattern_file.c_str(), cv::FileStorage::READ);
-  if(!fs.isOpened()) throw string("Could not open file ") + pattern_file;
+
+  if(!fs.isOpened()) throw string("Could not open file ") + pattern_file; //如果检测到产生异常，则抛出异常。
 
   vector<int> x1, y1, x2, y2;
   fs["x1"] >> x1;
