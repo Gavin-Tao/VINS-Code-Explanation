@@ -1,5 +1,14 @@
 #include "initial_alignment.h"
 
+/**
+ * @brief   陀螺仪偏置校正
+ * @optional    根据视觉SFM的结果来校正陀螺仪Bias -> Paper V-B-1
+ *              主要是将相邻帧之间SFM求解出来的旋转矩阵与IMU预积分的旋转量对齐
+ *              注意得到了新的Bias后对应的预积分需要repropagate
+ * @param[in]   all_image_frame所有图像帧构成的map,图像帧保存了位姿、预积分量和关于角点的信息
+ * @param[out]  Bgs 陀螺仪偏置
+ * @return      void
+*/
 void solveGyroscopeBias(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs)
 {
     Matrix3d A;
@@ -9,6 +18,7 @@ void solveGyroscopeBias(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs)
     b.setZero();
     map<double, ImageFrame>::iterator frame_i;
     map<double, ImageFrame>::iterator frame_j;
+    //https://blog.csdn.net/qq_41839222/article/details/89106128
     for (frame_i = all_image_frame.begin(); next(frame_i) != all_image_frame.end(); frame_i++)
     {
         frame_j = next(frame_i);
@@ -16,16 +26,22 @@ void solveGyroscopeBias(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs)
         tmp_A.setZero();
         VectorXd tmp_b(3);
         tmp_b.setZero();
-        Eigen::Quaterniond q_ij(frame_i->second.R.transpose() * frame_j->second.R);
+        //R_ij = (R^c0_bk)^-1 * (R^c0_bk+1) 转换为四元数 q_ij = (q^c0_bk)^-1 * (q^c0_bk+1)
+        Eigen::Quaterniond q_ij(frame_i->second.R.transpose() * frame_j->second.R); //second指ImageFrame
+        //tmp_A = J_j_bw
         tmp_A = frame_j->second.pre_integration->jacobian.template block<3, 3>(O_R, O_BG);
+        //tmp_b = 2 * ((r^bk_bk+1)^-1 * (q^c0_bk)^-1 * (q^c0_bk+1))_vec = 2 * ((r^bk_bk+1)^-1 * q_ij)_vec
         tmp_b = 2 * (frame_j->second.pre_integration->delta_q.inverse() * q_ij).vec();
+        //tmp_A * delta_bg = tmp_b
         A += tmp_A.transpose() * tmp_A;
         b += tmp_A.transpose() * tmp_b;
 
     }
+    //LDLT方法
     delta_bg = A.ldlt().solve(b);
     ROS_WARN_STREAM("gyroscope bias initial calibration " << delta_bg.transpose());
 
+    //得到了新的Bias后对应的预积分需要repropagate
     for (int i = 0; i <= WINDOW_SIZE; i++)
         Bgs[i] += delta_bg;
 
@@ -37,6 +53,8 @@ void solveGyroscopeBias(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs)
 }
 
 
+//在半径为G的半球找到切面的一对正交基 -> Algorithm 1  
+//求法跟论文不太一致，但是没影响
 MatrixXd TangentBasis(Vector3d &g0)
 {
     Vector3d b, c;
@@ -45,15 +63,25 @@ MatrixXd TangentBasis(Vector3d &g0)
     if(a == tmp)
         tmp << 1, 0, 0;
     b = (tmp - a * (a.transpose() * tmp)).normalized();
-    c = a.cross(b);
+    c = a.cross(b); //a与b外积
     MatrixXd bc(3, 2);
     bc.block<3, 1>(0, 0) = b;
     bc.block<3, 1>(0, 1) = c;
     return bc;
 }
 
+/**
+ * @brief       重力矢量细化
+ * @optional    重力细化，在其切线空间上用两个变量重新参数化重力 -> Paper V-B-3 
+                g^ = ||g|| * (g^-) + w1b1 + w2b2 
+ * @param[in]   all_image_frame 所有图像帧构成的map,图像帧保存了位姿，预积分量和关于角点的信息
+ * @param[out]  g 重力加速度
+ * @param[out]  x 待优化变量，窗口中每帧的速度V[0:n]、二自由度重力参数w[w1,w2]^T、尺度s
+ * @return      void
+*/
 void RefineGravity(map<double, ImageFrame> &all_image_frame, Vector3d &g, VectorXd &x)
 {
+    //g0 = (g^-)*||g||
     Vector3d g0 = g.normalized() * G.norm();
     Vector3d lx, ly;
     //VectorXd x;
@@ -67,8 +95,9 @@ void RefineGravity(map<double, ImageFrame> &all_image_frame, Vector3d &g, Vector
 
     map<double, ImageFrame>::iterator frame_i;
     map<double, ImageFrame>::iterator frame_j;
-    for(int k = 0; k < 4; k++)
+    for(int k = 0; k < 4; k++) //迭代4次
     {
+        //lxly = b = [b1,b2]
         MatrixXd lxly(3, 2);
         lxly = TangentBasis(g0);
         int i = 0;
@@ -115,16 +144,28 @@ void RefineGravity(map<double, ImageFrame> &all_image_frame, Vector3d &g, Vector
             A = A * 1000.0;
             b = b * 1000.0;
             x = A.ldlt().solve(b);
-            VectorXd dg = x.segment<2>(n_state - 3);
+            VectorXd dg = x.segment<2>(n_state - 3);//从倒数第三个取两个，w1与w2两个正交基
             g0 = (g0 + lxly * dg).normalized() * G.norm();
             //double s = x(n_state - 1);
     }   
     g = g0;
 }
 
+//速度、重力和尺度初始化
+/**
+ * @brief   计算尺度，重力加速度和速度
+ * @optional    速度、重力向量和尺度初始化Paper -> V-B-2
+ *              相邻帧之间的位置和速度与IMU预积分出来的位置和速度对齐，求解最小二乘
+ *              重力细化 -> Paper V-B-3    
+ * @param[in]   all_image_frame 所有图像帧构成的map,图像帧保存了位姿，预积分量和关于角点的信息
+ * @param[out]  g 重力加速度
+ * @param[out]  x 待优化变量，窗口中每帧的速度V[0:n]、重力g、尺度s
+ * @return      void
+*/
 bool LinearAlignment(map<double, ImageFrame> &all_image_frame, Vector3d &g, VectorXd &x)
 {
     int all_frame_count = all_image_frame.size();
+    //优化量x的总维度
     int n_state = all_frame_count * 3 + 3 + 1;
 
     MatrixXd A{n_state, n_state};
@@ -146,10 +187,14 @@ bool LinearAlignment(map<double, ImageFrame> &all_image_frame, Vector3d &g, Vect
 
         double dt = frame_j->second.pre_integration->sum_dt;
 
+        // tmp_A(6,10) = H^bk_bk+1 = [-I*dt           0             (R^bk_c0)*dt*dt/2   (R^bk_c0)*((p^c0_ck+1)-(p^c0_ck))  ] 
+        //                           [ -I    (R^bk_c0)*(R^c0_bk+1)      (R^bk_c0)*dt                  0                    ]
+        // tmp_b(6,1 ) = z^bk_bk+1 = [ (a^bk_bk+1)+(R^bk_c0)*(R^c0_bk+1)*p^b_c-p^b_c , (b^bk_bk+1)]^T
+        // tmp_A * x = tmp_b 求解最小二乘问题
         tmp_A.block<3, 3>(0, 0) = -dt * Matrix3d::Identity();
         tmp_A.block<3, 3>(0, 6) = frame_i->second.R.transpose() * dt * dt / 2 * Matrix3d::Identity();
         tmp_A.block<3, 1>(0, 9) = frame_i->second.R.transpose() * (frame_j->second.T - frame_i->second.T) / 100.0;     
-        tmp_b.block<3, 1>(0, 0) = frame_j->second.pre_integration->delta_p + frame_i->second.R.transpose() * frame_j->second.R * TIC[0] - TIC[0];
+        tmp_b.block<3, 1>(0, 0) = frame_j->second.pre_integration->delta_p + frame_i->second.R.transpose() * frame_j->second.R * TIC[0] - TIC[0]; //TIC camera到imu的平移向量
         //cout << "delta_p   " << frame_j->second.pre_integration->delta_p.transpose() << endl;
         tmp_A.block<3, 3>(3, 0) = -Matrix3d::Identity();
         tmp_A.block<3, 3>(3, 3) = frame_i->second.R.transpose() * frame_j->second.R;
@@ -165,27 +210,29 @@ bool LinearAlignment(map<double, ImageFrame> &all_image_frame, Vector3d &g, Vect
         MatrixXd r_A = tmp_A.transpose() * cov_inv * tmp_A;
         VectorXd r_b = tmp_A.transpose() * cov_inv * tmp_b;
 
-        A.block<6, 6>(i * 3, i * 3) += r_A.topLeftCorner<6, 6>();
-        b.segment<6>(i * 3) += r_b.head<6>();
+        A.block<6, 6>(i * 3, i * 3) += r_A.topLeftCorner<6, 6>(); //左上角6x6
+        b.segment<6>(i * 3) += r_b.head<6>(); //前6个元素
 
-        A.bottomRightCorner<4, 4>() += r_A.bottomRightCorner<4, 4>();
-        b.tail<4>() += r_b.tail<4>();
+        A.bottomRightCorner<4, 4>() += r_A.bottomRightCorner<4, 4>(); //右下角4x4
+        b.tail<4>() += r_b.tail<4>(); //后4个元素
 
-        A.block<6, 4>(i * 3, n_state - 4) += r_A.topRightCorner<6, 4>();
-        A.block<4, 6>(n_state - 4, i * 3) += r_A.bottomLeftCorner<4, 6>();
+        A.block<6, 4>(i * 3, n_state - 4) += r_A.topRightCorner<6, 4>(); //右上角6x4
+        A.block<4, 6>(n_state - 4, i * 3) += r_A.bottomLeftCorner<4, 6>(); //左下角4x6
     }
     A = A * 1000.0;
     b = b * 1000.0;
     x = A.ldlt().solve(b);
-    double s = x(n_state - 1) / 100.0;
+    double s = x(n_state - 1) / 100.0; //从倒数第一个取一个，前面除以100了，再乘上100
     ROS_DEBUG("estimated scale: %f", s);
-    g = x.segment<3>(n_state - 4);
-    ROS_DEBUG_STREAM(" result g     " << g.norm() << " " << g.transpose());
+    g = x.segment<3>(n_state - 4); //从倒数第四个开始取三个
+    ROS_DEBUG_STREAM(" result g     " << g.norm() << " " << g.transpose()); //norm()范数，即模长
+    //如果重力加速度与参考值差太大或者尺度为负则说明计算错误
     if(fabs(g.norm() - G.norm()) > 1.0 || s < 0)
     {
         return false;
     }
 
+    //重力细化
     RefineGravity(all_image_frame, g, x);
     s = (x.tail<1>())(0) / 100.0;
     (x.tail<1>())(0) = s;
@@ -198,8 +245,10 @@ bool LinearAlignment(map<double, ImageFrame> &all_image_frame, Vector3d &g, Vect
 
 bool VisualIMUAlignment(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs, Vector3d &g, VectorXd &x)
 {
+    //估测陀螺仪的Bias，对应论文V-B-1
     solveGyroscopeBias(all_image_frame, Bgs);
 
+    //求解V 重力向量g和 尺度s
     if(LinearAlignment(all_image_frame, g, x))
         return true;
     else 
