@@ -23,12 +23,14 @@ class ImageFrame
         {
             points = _points;
         };
+        
+        //// 图像特征点points，map第一索引是camera_id，内部第二层索引是feaure_id
         map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>> > > points;
         double t;
-        Matrix3d R;
+        Matrix3d R; //相机位姿
         Vector3d T;
-        IntegrationBase *pre_integration;
-        bool is_key_frame;
+        IntegrationBase *pre_integration; //IMU预积分
+        bool is_key_frame; //是否关键帧
 };
 
 bool VisualIMUAlignment(map<double, ImageFrame> &all_image_frame, Vector3d* Bgs, Vector3d &g, VectorXd &x);

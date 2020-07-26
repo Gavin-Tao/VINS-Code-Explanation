@@ -53,10 +53,10 @@ namespace cv {
         double cx = cameraMatrix.at<double>(0,2);
         double cy = cameraMatrix.at<double>(1,2);
 
-        points1.col(0) = (points1.col(0) - cx) / fx;
-        points2.col(0) = (points2.col(0) - cx) / fx;
-        points1.col(1) = (points1.col(1) - cy) / fy;
-        points2.col(1) = (points2.col(1) - cy) / fy;
+        points1.col(0) = (points1.col(0) - cx) / fx; //X0/Z0
+        points2.col(0) = (points2.col(0) - cx) / fx; //Y0/Z0
+        points1.col(1) = (points1.col(1) - cy) / fy; //X1/Z1
+        points2.col(1) = (points2.col(1) - cy) / fy; //Y1/Z1
 
         points1 = points1.t();
         points2 = points2.t();
@@ -248,7 +248,7 @@ bool MotionEstimator::solveRelativeRT(const vector<pair<Vector3d, Vector3d>> &co
 
         //得到窗口最后一帧（当前帧）到第l帧（参考帧）的坐标系变换Rt
         Rotation = R.transpose();
-        Translation = -R.transpose() * T;
+        Translation = -R.transpose() * T; //slam十四讲公式3.14
         if(inlier_cnt > 12)
             return true;
         else

@@ -22,7 +22,7 @@ void GlobalSFM::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matr
 	point_3d(2) = triangulated_point(2) / triangulated_point(3);
 }
 
-//PNP方法得到第l帧到第i帧的R_initial、P_initial
+//PNP方法得到当前帧相对于第l帧的R_initial、P_initial  也就是将当前帧变换到第l帧系下
 bool GlobalSFM::solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,
 								vector<SFMFeature> &sfm_f)
 {
@@ -82,7 +82,7 @@ bool GlobalSFM::solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,
 }
 
 /*
- * @brief 三角化frame0和frame1间所有对应点
+ * @brief 三角化frame0和frame1间所有对应点 更新sfm_f.position
  * @param[in]  frame,Pose 帧索引和位姿数据
  * @param[out]   sfm_f的state和position 3D坐标
  */
@@ -173,7 +173,7 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	//位姿3*4，第l帧到每一帧变换矩阵
 	Eigen::Matrix<double, 3, 4> Pose[frame_num];
 
-	//第l帧
+	//第l帧  见slam十四讲公式3.14
 	c_Quat[l] = q[l].inverse();
 	c_Rotation[l] = c_Quat[l].toRotationMatrix();
 	c_Translation[l] = -1 * (c_Rotation[l] * T[l]);
@@ -181,18 +181,17 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 	Pose[l].block<3, 1>(0, 3) = c_Translation[l];
 
 	//滑动窗最后一帧，即当前帧
-	c_Quat[frame_num - 1] = q[frame_num - 1].inverse();
+	c_Quat[frame_num - 1] = q[frame_num - 1].inverse(); //R的转置=四元数的逆
 	c_Rotation[frame_num - 1] = c_Quat[frame_num - 1].toRotationMatrix();
 	c_Translation[frame_num - 1] = -1 * (c_Rotation[frame_num - 1] * T[frame_num - 1]);
 	Pose[frame_num - 1].block<3, 3>(0, 0) = c_Rotation[frame_num - 1];
 	Pose[frame_num - 1].block<3, 1>(0, 3) = c_Translation[frame_num - 1];
 
-
-	//1: trangulate between l ----- frame_num - 1
-	//2: solve pnp l + 1; trangulate l + 1 ------- frame_num - 1; 
+	//pnp得到 l,l+1,l+2...frmaenum-2相机位姿，三角化l,l+1,l+2...frmaenum-2和framenum-1帧
 	for (int i = l; i < frame_num - 1 ; i++)
 	{
 		// solve pnp
+		//pnp得到 l,l+1,l+2...frmaenum-2相机位姿
 		if (i > l)
 		{
 			Matrix3d R_initial = c_Rotation[i - 1];
@@ -208,14 +207,15 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 		}
 
 		// triangulate point based on the solve pnp result
-		//l,l+1,l+2.....framenum-2和framenum-1 三角化恢复路标3D坐标
+		//三角化l,l+1,l+2...frmaenum-2和framenum-1帧
 		triangulateTwoFrames(i, Pose[i], frame_num - 1, Pose[frame_num - 1], sfm_f);
 	}
-	//3: triangulate l-----l+1 l+2 ... frame_num -2
+
+	//三角化 l+1,l+2......framenum-2和 l 帧
 	for (int i = l + 1; i < frame_num - 1; i++)
 		triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
-	//4: solve pnp l-1; triangulate l-1 ----- l
-	//             l-2              l-2 ----- l
+
+	//pnp得到l-1,l-2.....0相机位姿，三角化 l-1, l-2, l-3, …, 0帧与l帧 
 	for (int i = l - 1; i >= 0; i--)
 	{
 		//solve pnp
@@ -271,6 +271,9 @@ bool GlobalSFM::construct(int frame_num, Quaterniond* q, Vector3d* T, int l,
 */
 	//full BA
 	//使用cares进行全局BA优化（相机位姿和特征点坐标）
+	//固定住l帧的位置和姿态，固定住最后一帧的位置。因为这时候的图像位姿和点的位置都不太准，所以用ceres统一一起优化图像位姿和三维点位置，优化重投影误差。
+	//优化的测量值是，特征点在每帧中被观察到的位置，可以转成重投影误差约束。有关的自变量是，每帧图像的位姿，特征点的三维坐标。
+	//优化完成之后，即用ceres优化出这些关键帧的位姿和地图点后，再用pnp算出在这段时间区域内的所有图像的位姿。每个图像的计算都用下一个关键帧的位姿来当pnp的初值
 	ceres::Problem problem;
 	ceres::LocalParameterization* local_parameterization = new ceres::QuaternionParameterization();
 	//cout << " begin full BA " << endl;
